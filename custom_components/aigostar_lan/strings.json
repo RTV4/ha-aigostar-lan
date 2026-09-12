@@ -1,0 +1,16 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Aigostar LAN",
+        "description": "Start the local broker the bulbs connect to. You must also redirect the Alibaba MQTT hostname (public.iot-as-mqtt.eu-central-1.aliyuncs.com) to this Home Assistant host via your DNS server or router — see the documentation.",
+        "data": {
+          "port": "Broker port (must match the firmware; leave 1883)"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Aigostar LAN is already configured."
+    }
+  }
+}
