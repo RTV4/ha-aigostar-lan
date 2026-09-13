@@ -111,11 +111,14 @@ keeps working. NTP is answered locally over MQTT.
   it is gone — so the integration waits for its MQTT keepalive to lapse and
   retires it after about three minutes. Switch it back on and it reconnects and
   reappears within seconds.
-- **A bulb may start as `unknown`.** On connect the integration asks for the
-  current properties (and retries), but not every bulb answers that request,
-  and they only sometimes volunteer a snapshot by themselves. Rather than
-  invent a value, the entity stays `unknown` until the bulb actually reports —
-  the first command you send resolves it. Control is unaffected.
+- **A bulb may start as `unknown`.** A bulb that has just been powered on
+  reliably volunteers a full snapshot within a fraction of a second, so it
+  shows up with the right state. A bulb that merely reconnects — after Home
+  Assistant restarts, say — may send nothing. The integration also asks for the
+  properties explicitly and retries, but no bulb has yet been observed
+  answering that request, so it cannot be relied on. Rather than invent a
+  value, the entity stays `unknown` until the bulb reports; the first command
+  you send resolves it, and control is unaffected either way.
 
 ## Security
 
