@@ -58,5 +58,12 @@ PROPERTIES_TO_QUERY = [
 TOPIC_NTP_REQUEST   = "/ext/ntp/{pk}/{dn}/request"
 TOPIC_NTP_RESPONSE  = "/ext/ntp/{pk}/{dn}/response"
 
-# A device is considered offline if it has not spoken for this long.
+# A device is considered offline if it has not spoken for this long. The bulbs
+# use an MQTT keepalive of 120 s, so silence beyond this means the bulb is gone
+# (typically switched off at the wall) rather than merely idle. Cutting power
+# leaves the socket half-open, so waiting for TCP to notice would take far
+# longer than this.
 DEVICE_TIMEOUT_SECONDS = 180
+
+# How often to look for devices that have gone silent.
+LIVENESS_CHECK_SECONDS = 30

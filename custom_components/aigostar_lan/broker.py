@@ -20,6 +20,8 @@ from pathlib import Path
 
 from . import mqtt_codec as codec
 from .const import (
+    DEVICE_TIMEOUT_SECONDS,
+    LIVENESS_CHECK_SECONDS,
     PROPERTIES_TO_QUERY,
     TOPIC_NTP_RESPONSE,
     TOPIC_PROPERTY_GET,
@@ -71,6 +73,7 @@ class AigostarBroker:
         self._on_availability = on_availability
         self._server: asyncio.AbstractServer | None = None
         self._devices: dict[tuple[str, str], DeviceConn] = {}
+        self._liveness_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -96,8 +99,41 @@ class AigostarBroker:
             self._handle_client, "0.0.0.0", self._port, ssl=ssl_ctx
         )
         _LOGGER.info("Aigostar LAN broker listening on :%d", self._port)
+        self._liveness_task = asyncio.create_task(self._liveness_loop())
+
+    async def _liveness_loop(self) -> None:
+        """Retire devices that have gone silent.
+
+        A bulb switched off at the wall cannot close its connection, so the
+        socket lingers half-open and the entity would keep showing its last
+        state. The bulbs ping well inside DEVICE_TIMEOUT_SECONDS, so silence
+        past it means the bulb is really gone.
+        """
+        while True:
+            try:
+                await asyncio.sleep(LIVENESS_CHECK_SECONDS)
+            except asyncio.CancelledError:
+                return
+            now = time.monotonic()
+            for key, conn in list(self._devices.items()):
+                if now - conn.last_seen <= DEVICE_TIMEOUT_SECONDS:
+                    continue
+                _LOGGER.info(
+                    "Aigostar LAN: %s/%s silent for %.0fs, marking offline",
+                    conn.pk, conn.dn, now - conn.last_seen,
+                )
+                try:
+                    conn.writer.close()
+                except Exception:  # pragma: no cover - best effort
+                    pass
+                if self._devices.get(key) is conn:
+                    self._devices.pop(key, None)
+                    self._on_availability(conn.pk, conn.dn, False)
 
     async def stop(self) -> None:
+        if self._liveness_task is not None:
+            self._liveness_task.cancel()
+            self._liveness_task = None
         if self._server is not None:
             self._server.close()
             try:

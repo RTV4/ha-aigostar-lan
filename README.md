@@ -106,6 +106,16 @@ keeps working. NTP is answered locally over MQTT.
 - The DNS redirect is network-wide; there is no per-bulb switch.
 - State is reported by the bulb after it applies a command; a bulb changed
   physically or from another controller updates on its next post.
+- **A bulb switched off at the wall shows as `unavailable`,** but not instantly.
+  Cutting power leaves its connection half-open — the bulb cannot announce that
+  it is gone — so the integration waits for its MQTT keepalive to lapse and
+  retires it after about three minutes. Switch it back on and it reconnects and
+  reappears within seconds.
+- **A bulb may start as `unknown`.** On connect the integration asks for the
+  current properties (and retries), but not every bulb answers that request,
+  and they only sometimes volunteer a snapshot by themselves. Rather than
+  invent a value, the entity stays `unknown` until the bulb actually reports —
+  the first command you send resolves it. Control is unaffected.
 
 ## Security
 
