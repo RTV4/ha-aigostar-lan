@@ -55,18 +55,41 @@ starts the local broker.
 
 ### 3. Redirect the bulbs to Home Assistant (DNS)
 
-Point this hostname at your Home Assistant IP on your local DNS server:
+Add one DNS record on whatever resolver your bulbs actually use, pointing the
+bulbs' hardcoded MQTT hostname at Home Assistant:
 
 ```
 public.iot-as-mqtt.eu-central-1.aliyuncs.com  →  <your HA IP>
 ```
 
-- **Pi-hole:** Local DNS → DNS Records → add the name → HA IP.
-- **AdGuard Home:** Filters → DNS rewrites → add the name → HA IP.
-- **Router / dnsmasq:** `address=/public.iot-as-mqtt.eu-central-1.aliyuncs.com/<HA IP>`
+> Give Home Assistant a **fixed IP** first (a DHCP reservation, or a static
+> address). This record points at it, so if HA's IP changes the bulbs break.
+
+Recipes for the common resolvers — use the one you run:
+
+- **Pi-hole** — Settings → *Local DNS Records* → add `public.iot-as-mqtt.eu-central-1.aliyuncs.com` → `<HA IP>`.
+  (v6 stores it in `/etc/pihole/hosts/custom.list`; a line `<HA IP> public.iot-as-mqtt.eu-central-1.aliyuncs.com` + `pihole reloaddns` works too.)
+- **AdGuard Home** — Filters → *DNS rewrites* → Add: domain `public.iot-as-mqtt.eu-central-1.aliyuncs.com`, answer `<HA IP>`.
+- **OPNsense / pfSense (Unbound)** — Services → Unbound DNS → *Overrides* → Host Override: host `public`, domain `iot-as-mqtt.eu-central-1.aliyuncs.com`, IP `<HA IP>`. (Or a custom option: `local-data: "public.iot-as-mqtt.eu-central-1.aliyuncs.com A <HA IP>"`.)
+- **OpenWrt / dnsmasq** — add to `/etc/dnsmasq.conf` (or a file in `/etc/dnsmasq.d/`): `address=/public.iot-as-mqtt.eu-central-1.aliyuncs.com/<HA IP>`, then restart dnsmasq.
+- **MikroTik (RouterOS)** — `/ip dns static add name=public.iot-as-mqtt.eu-central-1.aliyuncs.com address=<HA IP>`.
+
+> The override only takes effect if the bulbs actually query that resolver.
+> Make sure your DHCP hands it out as the DNS server (or put the record on
+> whatever resolver the bulbs really use).
+
+**No DNS you can override? Redirect at the firewall instead.** On a Linux
+router, DNAT the bulbs' MQTT to Home Assistant. Because the bulbs sit on the
+same subnet as HA, you also need a hairpin `MASQUERADE` so replies come back
+through the router — per bulb:
+
+```bash
+iptables -t nat -A PREROUTING  -s <bulb IP> -p tcp --dport 1883 -j DNAT --to-destination <HA IP>:1883
+iptables -t nat -A POSTROUTING -s <bulb IP> -d <HA IP> -p tcp --dport 1883 -j MASQUERADE
+```
 
 > **This affects every Aigostar bulb on your network at once** — they all resolve
-> the same hostname.
+> the same hostname (the DNS route; the DNAT route is per-bulb).
 
 **Making the bulbs pick up the change.** A bulb caches the IP it resolved and, when
 its connection drops, reconnects straight to that cached address without asking
