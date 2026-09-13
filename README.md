@@ -1,5 +1,7 @@
 # Aigostar Smart Lights — LAN control for Home Assistant
 
+<img src="https://raw.githubusercontent.com/RTV4/ha-aigostar-lan/main/custom_components/aigostar_lan/brand/icon@2x.png" alt="Aigostar LAN" width="128" align="right">
+
 Control **Aigostar smart bulbs** (TG7100C / Bouffalo Lab chipset) entirely on your
 local network — no Alibaba cloud, no internet dependency. Lower latency, and the
 lights keep working when your internet goes down.
