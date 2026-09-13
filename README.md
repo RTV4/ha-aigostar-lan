@@ -66,8 +66,24 @@ public.iot-as-mqtt.eu-central-1.aliyuncs.com  →  <your HA IP>
 - **Router / dnsmasq:** `address=/public.iot-as-mqtt.eu-central-1.aliyuncs.com/<HA IP>`
 
 > **This affects every Aigostar bulb on your network at once** — they all resolve
-> the same hostname. Once the DNS change propagates, power-cycle a bulb (or wait
-> for it to reconnect) and it will appear in Home Assistant.
+> the same hostname.
+
+**Making the bulbs pick up the change.** A bulb caches the IP it resolved and, when
+its connection drops, reconnects straight to that cached address without asking
+DNS again — so simply restarting the connection is not enough. Either:
+
+- **power-cycle the bulb** (a cold boot always re-resolves), or
+- **briefly block its cloud path** so the cached address fails and it has to ask
+  DNS again. On a Linux router, for each bulb:
+
+  ```bash
+  iptables -I FORWARD 1 -s <bulb IP> -p tcp --dport 1883 ! -d <HA IP> -j DROP
+  # wait until the bulb appears in Home Assistant, then remove it:
+  iptables -D FORWARD -s <bulb IP> -p tcp --dport 1883 ! -d <HA IP> -j DROP
+  ```
+
+Bulbs that are powered off at the time simply join on their own the next time
+they are switched on.
 
 ### 4. (Optional) Go fully offline
 
