@@ -43,6 +43,7 @@ class DeviceConn:
         self.dn = dn
         self.writer = writer
         self.last_seen = time.monotonic()
+        self.state_task: asyncio.Task | None = None
         self._cmd_id = 0
 
     def next_id(self) -> str:
@@ -200,6 +201,8 @@ class AigostarBroker:
             # one finishes closing; without this check the dying connection
             # would evict its own replacement and the device would look
             # offline while actually being connected.
+            if conn is not None and conn.state_task is not None:
+                conn.state_task.cancel()
             if conn is not None and self._devices.get((conn.pk, conn.dn)) is conn:
                 self._devices.pop((conn.pk, conn.dn), None)
                 self._on_availability(conn.pk, conn.dn, False)
@@ -234,8 +237,25 @@ class AigostarBroker:
         _LOGGER.info("Aigostar LAN: %s/%s connected", pk, dn)
         await self._on_connect(pk, dn)
         self._on_availability(pk, dn, True)
-        await self.request_state(conn)
+        conn.state_task = asyncio.create_task(self._state_request_loop(conn))
         return conn
+
+    async def _state_request_loop(self, conn: DeviceConn) -> None:
+        """Ask for the state a few times, not just once.
+
+        Some bulbs answer within a few hundred milliseconds; others ignore a
+        request sent the instant they connect, presumably because their Alink
+        stack is not serving properties yet. Repeating costs nothing and is
+        idempotent — it is a read.
+        """
+        for delay in (0.5, 3.0, 10.0, 30.0):
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+            if self._devices.get((conn.pk, conn.dn)) is not conn:
+                return  # replaced by a newer connection, or gone
+            await self.request_state(conn)
 
     async def _on_publish(self, conn: DeviceConn, packet: codec.Packet) -> None:
         topic, packet_id, payload = codec.parse_publish(packet.flags, packet.body)
