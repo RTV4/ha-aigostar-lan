@@ -67,8 +67,11 @@ class AigostarLanLight(LightEntity):
             manufacturer="Aigostar",
             model="TG7100C (LAN)",
         )
-        self._is_on = False
-        self._brightness = 255
+        # Stay unknown until the bulb reports. Claiming "off" before the first
+        # state arrives is what made entities show a false off after a restart
+        # or a reconnect that carried no snapshot.
+        self._is_on: bool | None = None
+        self._brightness: int | None = None
         self._color_temp_k = 4000
         self._color_mode = ColorMode.COLOR_TEMP
         self._hs_color: tuple[float, float] = (0.0, 0.0)
@@ -104,11 +107,12 @@ class AigostarLanLight(LightEntity):
     # ------------------------------------------------------------------
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self) -> bool | None:
+        """None until the bulb has told us — HA then shows 'unknown', not 'off'."""
         return self._is_on
 
     @property
-    def brightness(self) -> int:
+    def brightness(self) -> int | None:
         return self._brightness
 
     @property
@@ -191,7 +195,11 @@ class AigostarLanLight(LightEntity):
         req_brightness = kwargs.get(ATTR_BRIGHTNESS)
         req_hs = kwargs.get(ATTR_HS_COLOR)
         req_kelvin = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
-        ha_b = int(req_brightness) if req_brightness is not None else self._brightness
+        ha_b = (
+            int(req_brightness)
+            if req_brightness is not None
+            else (self._brightness if self._brightness is not None else HA_BRIGHT_MAX)
+        )
 
         # A single LightMode: colour temp and colour are mutually exclusive;
         # colour temp wins when both are sent.

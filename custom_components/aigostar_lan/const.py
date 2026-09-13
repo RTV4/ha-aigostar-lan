@@ -41,8 +41,20 @@ AIGO_BRIGHT_MAX = 100
 COLOR_MODEL_HINTS = ("rgb", "color", "colour")
 
 # Alink downstream/upstream topic templates (pk = ProductKey, dn = DeviceName).
-TOPIC_PROPERTY_SET  = "/sys/{pk}/{dn}/thing/service/property/set"
-TOPIC_PROPERTY_POST = "/sys/{pk}/{dn}/thing/event/property/post"
+TOPIC_PROPERTY_SET       = "/sys/{pk}/{dn}/thing/service/property/set"
+TOPIC_PROPERTY_POST      = "/sys/{pk}/{dn}/thing/event/property/post"
+TOPIC_PROPERTY_GET       = "/sys/{pk}/{dn}/thing/service/property/get"
+TOPIC_PROPERTY_GET_REPLY = "/sys/{pk}/{dn}/thing/service/property/get_reply"
+
+# Asked for right after a device connects: a bulb posts a full snapshot on some
+# connections but not all, and without it the entity would sit at its default.
+PROPERTIES_TO_QUERY = [
+    PROP_SWITCH,
+    PROP_BRIGHTNESS,
+    PROP_COLOR_TEMP,
+    PROP_LIGHT_MODE,
+    PROP_HSV_COLOR,
+]
 TOPIC_NTP_REQUEST   = "/ext/ntp/{pk}/{dn}/request"
 TOPIC_NTP_RESPONSE  = "/ext/ntp/{pk}/{dn}/response"
 

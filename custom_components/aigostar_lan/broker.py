@@ -20,7 +20,10 @@ from pathlib import Path
 
 from . import mqtt_codec as codec
 from .const import (
+    PROPERTIES_TO_QUERY,
     TOPIC_NTP_RESPONSE,
+    TOPIC_PROPERTY_GET,
+    TOPIC_PROPERTY_GET_REPLY,
     TOPIC_PROPERTY_POST,
     TOPIC_PROPERTY_SET,
 )
@@ -133,6 +136,31 @@ class AigostarBroker:
         await conn.writer.drain()
         _LOGGER.debug("Aigostar LAN -> %s/%s set %s", pk, dn, params)
 
+    async def request_state(self, conn: "DeviceConn") -> None:
+        """Ask a freshly connected bulb for its current properties.
+
+        A bulb posts a full snapshot on some connections but not all; without
+        asking, an entity would keep whatever it was last told. If the firmware
+        ignores this, nothing breaks — the entity simply stays unknown until the
+        bulb reports on its own.
+        """
+        payload = json.dumps(
+            {
+                "id": conn.next_id(),
+                "version": "1.0.0",
+                "method": "thing.service.property.get",
+                "params": PROPERTIES_TO_QUERY,
+            },
+            separators=(",", ":"),
+        ).encode()
+        topic = TOPIC_PROPERTY_GET.format(pk=conn.pk, dn=conn.dn)
+        try:
+            conn.writer.write(codec.publish(topic, payload))
+            await conn.writer.drain()
+            _LOGGER.debug("Aigostar LAN -> %s/%s state request", conn.pk, conn.dn)
+        except Exception as err:  # pragma: no cover - best effort
+            _LOGGER.debug("Aigostar LAN state request failed: %s", err)
+
     # ------------------------------------------------------------------
     # Connection handling
     # ------------------------------------------------------------------
@@ -206,6 +234,7 @@ class AigostarBroker:
         _LOGGER.info("Aigostar LAN: %s/%s connected", pk, dn)
         await self._on_connect(pk, dn)
         self._on_availability(pk, dn, True)
+        await self.request_state(conn)
         return conn
 
     async def _on_publish(self, conn: DeviceConn, packet: codec.Packet) -> None:
@@ -218,7 +247,10 @@ class AigostarBroker:
             await self._answer_ntp(conn, payload)
             return
 
-        if topic == TOPIC_PROPERTY_POST.format(pk=conn.pk, dn=conn.dn):
+        if topic in (
+            TOPIC_PROPERTY_POST.format(pk=conn.pk, dn=conn.dn),
+            TOPIC_PROPERTY_GET_REPLY.format(pk=conn.pk, dn=conn.dn),
+        ):
             params = _extract_params(payload)
             if params:
                 self._on_state(conn.pk, conn.dn, params)
@@ -243,7 +275,10 @@ def _extract_params(payload: bytes) -> dict:
         data = json.loads(payload.split(b"\x00", 1)[0])
     except (ValueError, AttributeError):
         return {}
+    # A property post carries `params`; a get_reply carries `data`.
     params = data.get("params")
+    if not isinstance(params, dict):
+        params = data.get("data")
     if not isinstance(params, dict):
         return {}
     # The firmware sends either {"Brightness":50} or {"Brightness":{"value":50,"time":..}}.
