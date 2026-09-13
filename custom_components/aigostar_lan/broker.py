@@ -167,7 +167,12 @@ class AigostarBroker:
         except Exception as err:  # pragma: no cover - defensive
             _LOGGER.debug("Aigostar LAN client %s error: %s", peer, err)
         finally:
-            if conn is not None:
+            # Only retire the registry entry if it is still *this* connection.
+            # A bulb that reconnects registers the new socket before the old
+            # one finishes closing; without this check the dying connection
+            # would evict its own replacement and the device would look
+            # offline while actually being connected.
+            if conn is not None and self._devices.get((conn.pk, conn.dn)) is conn:
                 self._devices.pop((conn.pk, conn.dn), None)
                 self._on_availability(conn.pk, conn.dn, False)
             try:
@@ -186,6 +191,14 @@ class AigostarBroker:
             await writer.drain()
             return None
         pk, dn = head.split(".", 1)
+        # A reconnecting bulb leaves its previous socket half-open; drop it so
+        # only one connection per device is ever live.
+        previous = self._devices.get((pk, dn))
+        if previous is not None and previous.writer is not writer:
+            try:
+                previous.writer.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
         conn = DeviceConn(pk, dn, writer)
         self._devices[(pk, dn)] = conn
         writer.write(codec.connack(True))
