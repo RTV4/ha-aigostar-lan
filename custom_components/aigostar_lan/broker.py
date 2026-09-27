@@ -134,18 +134,22 @@ class AigostarBroker:
         if self._liveness_task is not None:
             self._liveness_task.cancel()
             self._liveness_task = None
-        if self._server is not None:
-            self._server.close()
-            try:
-                await self._server.wait_closed()
-            except Exception:  # pragma: no cover
-                pass
+        # Close client connections first, otherwise wait_closed() can block on
+        # open sockets and hang the config-entry unload (seen as the entry stuck
+        # in 'unload_in_progress').
         for conn in list(self._devices.values()):
             try:
                 conn.writer.close()
             except Exception:  # pragma: no cover
                 pass
         self._devices.clear()
+        if self._server is not None:
+            self._server.close()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), timeout=5)
+            except Exception:  # pragma: no cover - never let teardown hang
+                pass
+            self._server = None
 
     # ------------------------------------------------------------------
     # Control
