@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 import ssl
 import time
 from collections.abc import Awaitable, Callable
@@ -89,6 +90,29 @@ class AigostarBroker:
         except ssl.SSLError:  # pragma: no cover - openssl build dependent
             _LOGGER.warning("Could not lower cipher security level; old bulbs may fail")
         return ctx
+
+    @staticmethod
+    def _enable_keepalive(writer: asyncio.StreamWriter) -> None:
+        """Turn on TCP keepalive on an accepted connection.
+
+        A bulb that drops off the network (power blip, Wi-Fi loss) leaves the
+        broker with a half-open socket: the device still looks online, but
+        commands are written into a dead connection and silently lost — the
+        symptom being an entity that is 'available' yet uncontrollable until a
+        reload. Keepalive makes the OS notice the dead peer in about a minute,
+        which fails the read and lets the connection be retired so the bulb is
+        re-adopted when it reconnects.
+        """
+        sock = writer.get_extra_info("socket")
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            for opt, val in (("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
+                if hasattr(socket, opt):
+                    sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
+        except OSError:  # pragma: no cover - platform dependent
+            pass
 
     async def start(self) -> None:
         # Building the SSL context reads the cert/key from disk, which is
@@ -173,8 +197,21 @@ class AigostarBroker:
             separators=(",", ":"),
         ).encode()
         topic = TOPIC_PROPERTY_SET.format(pk=pk, dn=dn)
-        conn.writer.write(codec.publish(topic, payload))
-        await conn.writer.drain()
+        try:
+            conn.writer.write(codec.publish(topic, payload))
+            await conn.writer.drain()
+        except (OSError, ConnectionError) as err:
+            # The socket is dead/half-open: retire the entry so the entity goes
+            # unavailable and the bulb is re-adopted on its next reconnect,
+            # rather than swallowing the command.
+            if self._devices.get((pk, dn)) is conn:
+                self._devices.pop((pk, dn), None)
+                self._on_availability(pk, dn, False)
+            try:
+                conn.writer.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+            raise ConnectionError(f"device {pk}/{dn} write failed: {err}") from err
         _LOGGER.debug("Aigostar LAN -> %s/%s set %s", pk, dn, params)
 
     async def request_state(self, conn: "DeviceConn") -> None:
@@ -210,6 +247,7 @@ class AigostarBroker:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         peer = writer.get_extra_info("peername")
+        self._enable_keepalive(writer)
         conn: DeviceConn | None = None
         try:
             while True:
@@ -266,6 +304,8 @@ class AigostarBroker:
         # only one connection per device is ever live.
         previous = self._devices.get((pk, dn))
         if previous is not None and previous.writer is not writer:
+            if previous.state_task is not None:
+                previous.state_task.cancel()
             try:
                 previous.writer.close()
             except Exception:  # pragma: no cover - best effort
