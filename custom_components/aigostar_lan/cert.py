@@ -22,7 +22,12 @@ KEY_FILE = "aigostar_lan_key.pem"
 
 
 def ensure_cert(directory: Path) -> tuple[Path, Path]:
-    """Return (cert_path, key_path), generating them once if missing."""
+    """Return (cert_path, key_path), generating them once if missing.
+
+    Runs in the executor (callers use async_add_executor_job), so the directory
+    creation and key generation below stay off the event loop.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
     cert_path = directory / CERT_FILE
     key_path = directory / KEY_FILE
     if cert_path.exists() and key_path.exists():

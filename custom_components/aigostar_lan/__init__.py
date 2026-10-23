@@ -12,6 +12,7 @@ from pathlib import Path
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .broker import AigostarBroker
@@ -36,7 +37,6 @@ class AigostarLanManager:
 
     async def async_start(self) -> None:
         store = Path(self.hass.config.path(DOMAIN))
-        store.mkdir(parents=True, exist_ok=True)
         cert_path, key_path = await self.hass.async_add_executor_job(ensure_cert, store)
         port = self.entry.data.get(CONF_PORT, DEFAULT_PORT)
         self.broker = AigostarBroker(
@@ -96,8 +96,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await manager.async_start()
     except OSError as err:
-        _LOGGER.error("Aigostar LAN: could not start broker on port: %s", err)
-        raise
+        port = entry.data.get(CONF_PORT, DEFAULT_PORT)
+        raise ConfigEntryNotReady(
+            f"Could not start the Aigostar LAN broker on port {port} "
+            f"(is it already in use, e.g. by the Mosquitto add-on?): {err}"
+        ) from err
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = manager
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
