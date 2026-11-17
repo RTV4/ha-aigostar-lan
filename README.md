@@ -136,14 +136,19 @@ keeps working. NTP is answered locally over MQTT.
   it is gone — so the integration waits for its MQTT keepalive to lapse and
   retires it after about three minutes. Switch it back on and it reconnects and
   reappears within seconds.
-- **A bulb may start as `unknown`.** A bulb that has just been powered on
-  reliably volunteers a full snapshot within a fraction of a second, so it
-  shows up with the right state. A bulb that merely reconnects — after Home
-  Assistant restarts, say — may send nothing. The integration also asks for the
-  properties explicitly and retries, but no bulb has yet been observed
-  answering that request, so it cannot be relied on. Rather than invent a
-  value, the entity stays `unknown` until the bulb reports; the first command
-  you send resolves it, and control is unaffected either way.
+- **A reconnecting bulb may not report its state.** The integration preserves
+  the last device-reported properties across integration reloads and graceful
+  Home Assistant restarts, including brightness, colour mode and RGB capability.
+  Restored on/off state is marked as assumed until the bulb reports its switch
+  state again. Availability still follows the live connection. Pending or failed
+  commands are not saved as confirmed device state.
+- **A bulb without a saved report may start as `unknown`.** The integration asks
+  for the properties and retries, but no bulb has yet been observed answering
+  that request. A new device therefore needs an actual report before there is
+  anything to restore. Restoration does not query the physical state or send
+  commands to the bulb. Home Assistant saves restore data periodically and on
+  shutdown, so the latest report is not guaranteed to survive an abrupt power
+  loss.
 
 ## Security
 
