@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from copy import deepcopy
+from copy import copy, deepcopy
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from homeassistant.components.light import (
@@ -42,6 +43,73 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _aigo_to_ha_brightness(value: int) -> int:
+    value = max(AIGO_BRIGHT_MIN, min(AIGO_BRIGHT_MAX, value))
+    percent = (value - AIGO_BRIGHT_MIN) / (AIGO_BRIGHT_MAX - AIGO_BRIGHT_MIN)
+    return max(1, round(percent * HA_BRIGHT_MAX))
+
+
+def _aigo_to_kelvin(value: int) -> int:
+    return round(KELVIN_WARM + (value / 100.0) * (KELVIN_COOL - KELVIN_WARM))
+
+
+@dataclass
+class _LightState:
+    """Parsed light properties, independent of connection and command state."""
+
+    is_on: bool | None = None
+    brightness: int | None = None
+    color_temp_k: int = 4000
+    color_mode: ColorMode = ColorMode.COLOR_TEMP
+    hs_color: tuple[float, float] = (0.0, 0.0)
+    supports_hs: bool = False
+
+    def __post_init__(self) -> None:
+        # JSON stores enums as strings and tuples as lists.
+        self.color_mode = ColorMode(self.color_mode)
+        self.hs_color = tuple(self.hs_color)
+
+    def apply_properties(self, params: dict) -> None:
+        """Reduce one report, preserving fields absent from partial reports."""
+        if PROP_HSV_COLOR in params or PROP_LIGHT_MODE in params:
+            self.supports_hs = True
+
+        switch_state = _num(params.get(PROP_SWITCH), None)
+        if switch_state is not None:
+            self.is_on = bool(switch_state)
+
+        mode = _num(params.get(PROP_LIGHT_MODE), None)
+        if mode is not None:
+            self.color_mode = (
+                ColorMode.HS
+                if int(mode) == LIGHT_MODE_COLOR and self.supports_hs
+                else ColorMode.COLOR_TEMP
+            )
+
+        hsv = params.get(PROP_HSV_COLOR)
+        hsv_value = None
+        if isinstance(hsv, dict):
+            hue = _num(hsv.get(HSV_KEY_HUE), None)
+            sat = _num(hsv.get(HSV_KEY_SATURATION), None)
+            if hue is not None and sat is not None:
+                self.hs_color = (
+                    max(0.0, min(float(AIGO_HUE_MAX), hue)),
+                    max(0.0, min(float(AIGO_SAT_MAX), sat)),
+                )
+            hsv_value = _num(hsv.get(HSV_KEY_VALUE), None)
+
+        if self.color_mode == ColorMode.HS and hsv_value is not None:
+            self.brightness = _aigo_to_ha_brightness(int(hsv_value))
+        else:
+            brightness = _num(params.get(PROP_BRIGHTNESS), None)
+            if brightness is not None:
+                self.brightness = _aigo_to_ha_brightness(int(brightness))
+
+        color_temp = _num(params.get(PROP_COLOR_TEMP), None)
+        if color_temp is not None:
+            self.color_temp_k = _aigo_to_kelvin(int(color_temp))
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -69,57 +137,48 @@ class AigostarLanLight(LightEntity, RestoreEntity):
             manufacturer="Aigostar",
             model="TG7100C (LAN)",
         )
-        # Stay unknown until the bulb reports. Claiming "off" before the first
-        # state arrives is what made entities show a false off after a restart
-        # or a reconnect that carried no snapshot.
-        self._is_on: bool | None = None
-        self._brightness: int | None = None
-        self._color_temp_k = 4000
-        self._color_mode = ColorMode.COLOR_TEMP
-        self._hs_color: tuple[float, float] = (0.0, 0.0)
-        self._attr_supported_color_modes = {ColorMode.COLOR_TEMP}
+        self._state = _LightState()
+        # Commands update the displayed state only. Persistence uses properties
+        # confirmed by device reports, including their order of arrival.
+        self._reported_state = _LightState()
+        self._pending_reports: list[dict] | None = []
+        self.async_on_remove(self._discard_pending_reports)
+        self._has_live_switch = False
+        self._attr_assumed_state = True
         self._attr_available = self._manager.broker.is_online(pk, dn)
-        # Only device reports belong here. Optimistic commands must never
-        # become the last confirmed state saved for the next reload.
-        self._reported_params: dict[str, Any] = {}
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         restored = await self.async_get_last_extra_data()
-        if restored is None:
-            return
-        saved_params = restored.as_dict().get("reported_params")
-        if not isinstance(saved_params, dict):
-            return
-        # A report may arrive before or while restore data is being loaded.
-        # Fresh properties take precedence over the previous connection's data.
-        has_live_switch = _num(self._reported_params.get(PROP_SWITCH), None) is not None
-        self._reported_params = {**saved_params, **self._reported_params}
-        self._apply_properties(self._reported_params)
-        self._attr_assumed_state = not has_live_switch or not self._attr_available
+        saved_state = restored.as_dict().get("reported_state") if restored else None
+        self._reported_state = (
+            _LightState(**saved_state) if isinstance(saved_state, dict) else _LightState()
+        )
+        # Replay early reports in order. A merged raw dictionary loses partial
+        # HSV fields and the ordering of mode-dependent brightness reports.
+        for params in self._pending_reports or ():
+            self._reported_state.apply_properties(params)
+        self._discard_pending_reports()
+        self._state = copy(self._reported_state)
+        self._attr_assumed_state = not self._has_live_switch or not self._attr_available
+
+    @callback
+    def _discard_pending_reports(self) -> None:
+        # HA also runs removal callbacks when it skips a disabled entity.
+        self._pending_reports = None
 
     @property
     def extra_restore_state_data(self) -> ExtraStoredData:
-        return RestoredExtraData({"reported_params": deepcopy(self._reported_params)})
+        return RestoredExtraData({"reported_state": asdict(self._reported_state)})
 
     # ------------------------------------------------------------------
     # Conversions (kept identical to the cloud integration for parity)
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _aigo_to_ha_brightness(v: int) -> int:
-        v = max(AIGO_BRIGHT_MIN, min(AIGO_BRIGHT_MAX, v))
-        pct = (v - AIGO_BRIGHT_MIN) / (AIGO_BRIGHT_MAX - AIGO_BRIGHT_MIN)
-        return max(1, round(pct * HA_BRIGHT_MAX))
-
-    @staticmethod
     def _ha_to_aigo_brightness(v: int) -> int:
         pct = max(0, min(HA_BRIGHT_MAX, v)) / HA_BRIGHT_MAX
         return AIGO_BRIGHT_MIN + round(pct * (AIGO_BRIGHT_MAX - AIGO_BRIGHT_MIN))
-
-    @staticmethod
-    def _aigo_to_kelvin(v: int) -> int:
-        return round(KELVIN_WARM + (v / 100.0) * (KELVIN_COOL - KELVIN_WARM))
 
     @staticmethod
     def _kelvin_to_aigo(k: int) -> int:
@@ -133,27 +192,29 @@ class AigostarLanLight(LightEntity, RestoreEntity):
     @property
     def is_on(self) -> bool | None:
         """None until the bulb has told us — HA then shows 'unknown', not 'off'."""
-        return self._is_on
+        return self._state.is_on
 
     @property
     def brightness(self) -> int | None:
-        return self._brightness
+        return self._state.brightness
 
     @property
     def color_mode(self) -> ColorMode:
-        return self._color_mode
+        return self._state.color_mode
 
     @property
     def color_temp_kelvin(self) -> int | None:
-        return self._color_temp_k if self._color_mode == ColorMode.COLOR_TEMP else None
+        return self._state.color_temp_k if self.color_mode == ColorMode.COLOR_TEMP else None
 
     @property
     def hs_color(self) -> tuple[float, float] | None:
-        return self._hs_color if self._color_mode == ColorMode.HS else None
+        return self._state.hs_color if self.color_mode == ColorMode.HS else None
 
     @property
-    def _supports_hs(self) -> bool:
-        return ColorMode.HS in (self._attr_supported_color_modes or ())
+    def supported_color_modes(self) -> set[ColorMode]:
+        if self._state.supports_hs:
+            return {ColorMode.COLOR_TEMP, ColorMode.HS}
+        return {ColorMode.COLOR_TEMP}
 
     # ------------------------------------------------------------------
     # State from the device (property/post)
@@ -162,60 +223,23 @@ class AigostarLanLight(LightEntity, RestoreEntity):
     @callback
     def apply_state(self, params: dict) -> None:
         _LOGGER.debug("Aigostar LAN [%s] state: %s", self._dn, params)
-        self._reported_params.update(params)
-        self._apply_properties(params)
+        if self._pending_reports is not None:
+            self._pending_reports.append(deepcopy(params))
+        self._reported_state.apply_properties(params)
+        self._state.apply_properties(params)
         if _num(params.get(PROP_SWITCH), None) is not None:
+            self._has_live_switch = True
             self._attr_assumed_state = False
         if self.hass is not None:
             self.async_write_ha_state()
 
-    def _apply_properties(self, params: dict) -> None:
-        """Apply reported or restored properties using the same conversions."""
-        if PROP_HSV_COLOR in params or PROP_LIGHT_MODE in params:
-            self._attr_supported_color_modes = {ColorMode.COLOR_TEMP, ColorMode.HS}
-
-        switch_state = _num(params.get(PROP_SWITCH), None)
-        if switch_state is not None:
-            self._is_on = bool(switch_state)
-
-        if PROP_LIGHT_MODE in params:
-            mode = _num(params[PROP_LIGHT_MODE], None)
-            if mode is not None:
-                self._color_mode = (
-                    ColorMode.HS
-                    if int(mode) == LIGHT_MODE_COLOR and self._supports_hs
-                    else ColorMode.COLOR_TEMP
-                )
-
-        hsv = params.get(PROP_HSV_COLOR)
-        hsv_value = None
-        if isinstance(hsv, dict):
-            hue = _num(hsv.get(HSV_KEY_HUE), None)
-            sat = _num(hsv.get(HSV_KEY_SATURATION), None)
-            if hue is not None and sat is not None:
-                self._hs_color = (
-                    max(0.0, min(float(AIGO_HUE_MAX), hue)),
-                    max(0.0, min(float(AIGO_SAT_MAX), sat)),
-                )
-            hsv_value = _num(hsv.get(HSV_KEY_VALUE), None)
-
-        if self._color_mode == ColorMode.HS and hsv_value is not None:
-            self._brightness = self._aigo_to_ha_brightness(int(hsv_value))
-        elif PROP_BRIGHTNESS in params:
-            b = _num(params[PROP_BRIGHTNESS], None)
-            if b is not None:
-                self._brightness = self._aigo_to_ha_brightness(int(b))
-
-        if PROP_COLOR_TEMP in params:
-            ct = _num(params[PROP_COLOR_TEMP], None)
-            if ct is not None:
-                self._color_temp_k = self._aigo_to_kelvin(int(ct))
-
     @callback
     def set_available(self, available: bool) -> None:
         self._attr_available = available
-        if not available:
-            self._attr_assumed_state = True
+        # A replacement socket can CONNECT before the old socket closes, with
+        # no intervening unavailable callback. Every connection needs a report.
+        self._has_live_switch = False
+        self._attr_assumed_state = True
         if self.hass is not None:
             self.async_write_ha_state()
 
@@ -231,7 +255,7 @@ class AigostarLanLight(LightEntity, RestoreEntity):
         ha_b = (
             int(req_brightness)
             if req_brightness is not None
-            else (self._brightness if self._brightness is not None else HA_BRIGHT_MAX)
+            else (self.brightness if self.brightness is not None else HA_BRIGHT_MAX)
         )
 
         # A single LightMode: colour temp and colour are mutually exclusive;
@@ -241,27 +265,27 @@ class AigostarLanLight(LightEntity, RestoreEntity):
             items[PROP_LIGHT_MODE] = LIGHT_MODE_WHITE
             if req_brightness is not None:
                 items[PROP_BRIGHTNESS] = self._ha_to_aigo_brightness(ha_b)
-            self._color_temp_k = int(req_kelvin)
-            self._color_mode = ColorMode.COLOR_TEMP
+            self._state.color_temp_k = int(req_kelvin)
+            self._state.color_mode = ColorMode.COLOR_TEMP
         elif req_hs is not None:
             hue, sat = req_hs
             items[PROP_HSV_COLOR] = self._hsv_item(float(hue), float(sat), ha_b)
             items[PROP_LIGHT_MODE] = LIGHT_MODE_COLOR
-            self._hs_color = (float(hue), float(sat))
-            self._color_mode = ColorMode.HS
+            self._state.hs_color = (float(hue), float(sat))
+            self._state.color_mode = ColorMode.HS
         elif req_brightness is not None:
-            if self._color_mode == ColorMode.HS and self._hs_color[1] > 0:
-                items[PROP_HSV_COLOR] = self._hsv_item(*self._hs_color, ha_b)
+            if self.color_mode == ColorMode.HS and self._state.hs_color[1] > 0:
+                items[PROP_HSV_COLOR] = self._hsv_item(*self._state.hs_color, ha_b)
                 items[PROP_LIGHT_MODE] = LIGHT_MODE_COLOR
             else:
                 items[PROP_BRIGHTNESS] = self._ha_to_aigo_brightness(ha_b)
         if req_brightness is not None:
-            self._brightness = ha_b
-        self._is_on = True
+            self._state.brightness = ha_b
+        self._state.is_on = True
         await self._send(items)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        self._is_on = False
+        self._state.is_on = False
         await self._send({PROP_SWITCH: 0})
 
     def _hsv_item(self, hue: float, sat: float, ha_b: int) -> dict[str, int]:
