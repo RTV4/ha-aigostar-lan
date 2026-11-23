@@ -33,7 +33,6 @@ class AigostarLanManager:
         self.broker: AigostarBroker | None = None
         self._entities: dict[str, AigostarLanLight] = {}
         self._add_entities: AddEntitiesCallback | None = None
-        self._pending: list[tuple[str, str]] = []
 
     async def async_start(self) -> None:
         store = Path(self.hass.config.path(DOMAIN))
@@ -54,9 +53,7 @@ class AigostarLanManager:
     @callback
     def bind_light_platform(self, add_entities: AddEntitiesCallback) -> None:
         self._add_entities = add_entities
-        pending, self._pending = self._pending, []
-        for pk, dn in pending:
-            self._create_entity(pk, dn)
+        add_entities(list(self._entities.values()))
 
     # --- broker callbacks (run on the event loop) ---------------------
 
@@ -64,18 +61,18 @@ class AigostarLanManager:
         if dn in self._entities:
             self._entities[dn].set_available(True)
             return
-        if self._add_entities is None:
-            self._pending.append((pk, dn))
-            return
         self._create_entity(pk, dn)
 
     @callback
     def _create_entity(self, pk: str, dn: str) -> None:
-        if dn in self._entities or self._add_entities is None:
+        if dn in self._entities:
             return
+        # Keep reports received before the light platform is ready. Only adding
+        # the entity to HA is deferred; the device already has a state owner.
         entity = AigostarLanLight(self, pk, dn)
         self._entities[dn] = entity
-        self._add_entities([entity])
+        if self._add_entities is not None:
+            self._add_entities([entity])
         _LOGGER.info("Aigostar LAN: added light for %s/%s", pk, dn)
 
     @callback
