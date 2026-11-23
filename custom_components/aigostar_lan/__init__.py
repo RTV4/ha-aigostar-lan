@@ -33,6 +33,7 @@ class AigostarLanManager:
         self.broker: AigostarBroker | None = None
         self._entities: dict[str, AigostarLanLight] = {}
         self._add_entities: AddEntitiesCallback | None = None
+        self._added: set[str] = set()
 
     async def async_start(self) -> None:
         store = Path(self.hass.config.path(DOMAIN))
@@ -53,7 +54,19 @@ class AigostarLanManager:
     @callback
     def bind_light_platform(self, add_entities: AddEntitiesCallback) -> None:
         self._add_entities = add_entities
-        add_entities(list(self._entities.values()))
+        for dn in list(self._entities):
+            self._add_to_ha(dn)
+
+    @callback
+    def _add_to_ha(self, dn: str) -> None:
+        """Add an entity to HA exactly once, even if create/bind runs twice."""
+        if self._add_entities is None or dn in self._added:
+            return
+        entity = self._entities.get(dn)
+        if entity is None:
+            return
+        self._add_entities([entity])
+        self._added.add(dn)
 
     # --- broker callbacks (run on the event loop) ---------------------
 
@@ -71,8 +84,7 @@ class AigostarLanManager:
         # the entity to HA is deferred; the device already has a state owner.
         entity = AigostarLanLight(self, pk, dn)
         self._entities[dn] = entity
-        if self._add_entities is not None:
-            self._add_entities([entity])
+        self._add_to_ha(dn)
         _LOGGER.info("Aigostar LAN: added light for %s/%s", pk, dn)
 
     @callback

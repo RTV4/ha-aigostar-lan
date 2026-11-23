@@ -17,7 +17,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity, RestoredExtraData
+from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 
 from .const import (
     AIGO_BRIGHT_MAX,
@@ -110,6 +110,19 @@ class _LightState:
             self.color_temp_k = _aigo_to_kelvin(int(color_temp))
 
 
+_MAX_PENDING_REPORTS = 50
+
+
+@dataclass
+class _AigostarExtraData(ExtraStoredData):
+    """The device-confirmed snapshot persisted through RestoreEntity."""
+
+    reported_state: dict
+
+    def as_dict(self) -> dict:
+        return {"reported_state": self.reported_state}
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -151,9 +164,20 @@ class AigostarLanLight(LightEntity, RestoreEntity):
         await super().async_added_to_hass()
         restored = await self.async_get_last_extra_data()
         saved_state = restored.as_dict().get("reported_state") if restored else None
-        self._reported_state = (
-            _LightState(**saved_state) if isinstance(saved_state, dict) else _LightState()
-        )
+        # A renamed/removed field or a corrupted restore record must not brick
+        # the entity: an unguarded _LightState(**saved_state) would raise out of
+        # async_added_to_hass and the light would never be added to HA.
+        if isinstance(saved_state, dict):
+            try:
+                self._reported_state = _LightState(**saved_state)
+            except (TypeError, ValueError) as err:
+                _LOGGER.warning(
+                    "Aigostar LAN [%s]: ignoring unreadable restored state (%s)",
+                    self._dn, err,
+                )
+                self._reported_state = _LightState()
+        else:
+            self._reported_state = _LightState()
         # Replay early reports in order. A merged raw dictionary loses partial
         # HSV fields and the ordering of mode-dependent brightness reports.
         for params in self._pending_reports or ():
@@ -169,7 +193,7 @@ class AigostarLanLight(LightEntity, RestoreEntity):
 
     @property
     def extra_restore_state_data(self) -> ExtraStoredData:
-        return RestoredExtraData({"reported_state": asdict(self._reported_state)})
+        return _AigostarExtraData(asdict(self._reported_state))
 
     # ------------------------------------------------------------------
     # Conversions (kept identical to the cloud integration for parity)
@@ -191,7 +215,9 @@ class AigostarLanLight(LightEntity, RestoreEntity):
 
     @property
     def is_on(self) -> bool | None:
-        """None until the bulb has told us — HA then shows 'unknown', not 'off'."""
+        """Last reported or restored on/off; None (HA shows 'unknown') until the
+        bulb reports or a stored value is restored. `assumed_state` flags a value
+        not yet confirmed on the live connection."""
         return self._state.is_on
 
     @property
@@ -225,6 +251,9 @@ class AigostarLanLight(LightEntity, RestoreEntity):
         _LOGGER.debug("Aigostar LAN [%s] state: %s", self._dn, params)
         if self._pending_reports is not None:
             self._pending_reports.append(deepcopy(params))
+            # Bound the buffer in case the platform never binds (a setup
+            # failure): the reducer only needs the recent reports to rebuild.
+            del self._pending_reports[:-_MAX_PENDING_REPORTS]
         self._reported_state.apply_properties(params)
         self._state.apply_properties(params)
         if _num(params.get(PROP_SWITCH), None) is not None:

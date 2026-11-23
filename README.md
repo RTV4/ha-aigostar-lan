@@ -43,8 +43,11 @@ colour temperature and (on RGBCCT models) colour.
 
 ### 1. Install the integration
 
-**HACS (custom repository):** HACS → ⋮ → Custom repositories → add this repo as
-an *Integration* → install → restart Home Assistant.
+**HACS:** search for **Aigostar Smart Lights (LAN)** in HACS → install → restart
+Home Assistant.
+
+If it is not listed yet, add it as a custom repository first: HACS → ⋮ →
+*Custom repositories* → add this repo as an *Integration*, then install it.
 
 **Manual:** copy `custom_components/aigostar_lan` into your HA
 `config/custom_components/` directory and restart.
